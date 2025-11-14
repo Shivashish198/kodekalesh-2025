@@ -5,24 +5,48 @@ from sqlalchemy import create_engine, text
 import pdfplumber
 import docx
 from transformers import pipeline
-
-# --- Translation (deep_translator) and language detection (langdetect) ---
 from deep_translator import GoogleTranslator
 from langdetect import detect, LangDetectException
+import bcrypt
 
-# --- Setup directories ---
+# ============================================
+# 🌓 THEME TOGGLE (Light / Dark Mode)
+# ============================================
+st.sidebar.markdown("### 🌓 Theme")
+theme_choice = st.sidebar.radio("Choose Theme:", ["Light", "Dark"], index=0)
+
+if theme_choice == "Dark":
+    st.markdown("""
+        <style>
+        body, .stApp { background-color: #0e1117 !important; color: white !important; }
+        .stButton button { background-color: #4a4a4a !important; color: white !important; border-radius: 8px; }
+        .stTextInput > div > div > input { background-color: #262730 !important; color: white !important; }
+        </style>
+    """, unsafe_allow_html=True)
+else:
+    st.markdown("""
+        <style>
+        body, .stApp { background-color: white !important; color: black !important; }
+        .stButton button { background-color: #e0e0e0 !important; color: black !important; border-radius: 8px; }
+        .stTextInput > div > div > input { background-color: #fafafa !important; color: black !important; }
+        </style>
+    """, unsafe_allow_html=True)
+
+# ============================================
+# DIRECTORY + DATABASE INITIALIZATION
+# ============================================
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# --- MySQL Connection ---
 MYSQL_USER = "lexiuser"
 MYSQL_PASSWORD = "password123"
 MYSQL_HOST = "localhost"
 MYSQL_DB = "lexibrief_db"
 
-engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}/{MYSQL_DB}")
+engine = create_engine(
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}/{MYSQL_DB}"
+)
 
-# --- Create table if not exists (now includes tags, language, summary_translated) ---
 with engine.connect() as conn:
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS files (
@@ -38,128 +62,84 @@ with engine.connect() as conn:
         )
     """))
 
-# --- Initialize summarization pipeline ---
-@st.cache_resource
-def load_summarizer():
-    return pipeline("summarization", model="facebook/bart-large-cnn")
-
-summarizer = load_summarizer()
-
-# === Tagging setup: try KeyBERT, fallback if not available ===
-try:
-    from keybert import KeyBERT
-    kw_model = KeyBERT()
-    def generate_tags(summary):
-        if not summary or summary.strip() == "" or summary.startswith("Not enough"):
-            return ""
-        try:
-            keywords = kw_model.extract_keywords(
-                summary,
-                keyphrase_ngram_range=(1, 2),
-                stop_words='english',
-                top_n=5
-            )
-            tags = [kw for kw, score in keywords]
-            return ", ".join(tags)
-        except Exception:
-            pass
-except Exception:
-    kw_model = None
-    import re
-    def generate_tags(summary):
-        if not summary or summary.strip() == "" or summary.startswith("Not enough"):
-            return ""
-        stopwords = set([
-            "the","and","of","to","in","a","is","for","that","on","with","as","by","be","this","an",
-            "are","or","it","from","which","at","have","has","was","were","but","not","their","such"
-        ])
-        words = re.findall(r"\b[a-zA-Z]{3,}\b", summary.lower())
-        freq = {}
-        for w in words:
-            if w in stopwords:
-                continue
-            freq[w] = freq.get(w, 0) + 1
-        top = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:5]
-        tags = [w for w, _ in top]
-        return ", ".join(tags)
-
-# === Simple bcrypt-based authentication (drop-in replacement) ===
-import bcrypt
-
-# --- Define users and plaintext passwords (for dev/hackathon only) ---
-USER_PLAINTEXT = {
-    "admin": "admin@123",
-    "judge": "judge@123"
+# ============================================
+# ROLE-BASED USERS
+# ============================================
+USER_ROLES = {
+    "client": {"password": "client@123", "role": "client"},
+    "lawyer": {"password": "lawyer@123", "role": "lawyer"},
+    "judge": {"password": "judge@123", "role": "judge"},
+    "admin": {"password": "admin@123", "role": "admin"},
 }
 
-# --- Create hashed password mapping once per session/run ---
-if "user_password_hashes" not in st.session_state:
-    st.session_state.user_password_hashes = {
-        user: bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-        for user, pw in USER_PLAINTEXT.items()
+# Hash passwords only once
+if "password_hashes" not in st.session_state:
+    st.session_state.password_hashes = {
+        user: bcrypt.hashpw(info["password"].encode(), bcrypt.gensalt()).decode()
+        for user, info in USER_ROLES.items()
     }
 
-# --- Initialize auth state ---
+# Authentication state
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "auth_user" not in st.session_state:
     st.session_state.auth_user = None
+if "role" not in st.session_state:
+    st.session_state.role = None
 if "login_error" not in st.session_state:
     st.session_state.login_error = ""
 
-# --- Translation helper functions using deep_translator + langdetect ---
+# ============================================
+# LANGUAGE DETECT + TRANSLATE HELPERS
+# ============================================
 def detect_language(text):
     try:
-        if not text or text.strip() == "":
+        if not text.strip():
             return "unknown"
         return detect(text)
-    except LangDetectException:
-        return "unknown"
-    except Exception:
+    except:
         return "unknown"
 
-def translate_text(text, dest_lang):
-    """
-    Translate text to dest_lang using deep_translator.GoogleTranslator.
-    dest_lang should be language code like 'en', 'hi', 'ta', etc.
-    On any failure returns original text.
-    """
+def translate_text(text, dest):
     try:
-        if not text or dest_lang is None:
-            return text
-        # deep_translator expects language codes; set source='auto'
-        return GoogleTranslator(source='auto', target=dest_lang).translate(text)
-    except Exception:
+        return GoogleTranslator(source="auto", target=dest).translate(text)
+    except:
         return text
-
-# --- Sidebar login form + UI language selector ---
+# ============================================
+# SIDEBAR: UI LANGUAGE + LOGIN FORM (Centralized)
+# ============================================
 with st.sidebar:
-    st.header("🔒 Login")
-    # UI language selector (affects displayed labels/text)
+    st.markdown("## ⚖️ LexiBrief+ — Login & Settings")
+
+    # UI language selector
     ui_lang = st.selectbox("🌐 UI Language", [
         "English", "Hindi", "Marathi", "Tamil", "Telugu",
         "Kannada", "Bengali", "Gujarati", "Punjabi", "Urdu"
     ], index=0)
 
-    # Simple mapping to language codes for deep_translator
     lang_code_map = {
         "English":"en","Hindi":"hi","Marathi":"mr","Tamil":"ta","Telugu":"te",
         "Kannada":"kn","Bengali":"bn","Gujarati":"gu","Punjabi":"pa","Urdu":"ur"
     }
     ui_lang_code = lang_code_map.get(ui_lang, "en")
 
+    st.markdown("---")
+    st.markdown("### 🔒 Login")
     if not st.session_state.authenticated:
-        username_input = st.text_input("Username", key="username_input")
-        password_input = st.text_input("Password", type="password", key="password_input")
-        if st.button("Login", key="login_btn"):
-            if username_input in st.session_state.user_password_hashes:
-                hashed = st.session_state.user_password_hashes[username_input].encode("utf-8")
-                if bcrypt.checkpw(password_input.encode("utf-8"), hashed):
+        username_input = st.text_input("Username", key="login_username")
+        password_input = st.text_input("Password", type="password", key="login_password")
+        if st.button("Login", key="login_button"):
+            if username_input in st.session_state.password_hashes:
+                stored_hash = st.session_state.password_hashes[username_input].encode()
+                if bcrypt.checkpw(password_input.encode(), stored_hash):
+                    # success
                     st.session_state.authenticated = True
                     st.session_state.auth_user = username_input
+                    st.session_state.role = USER_ROLES[username_input]["role"]
                     st.session_state.login_error = ""
+                    # rerun safely
                     try:
-                        st.rerun()
+                        st.experimental_rerun()
                     except Exception:
                         try:
                             st.rerun()
@@ -168,294 +148,328 @@ with st.sidebar:
                 else:
                     st.session_state.login_error = "Incorrect username or password."
             else:
-                st.session_state.login_error = "Incorrect username or password."
+                st.session_state.login_error = "User not found."
         if st.session_state.login_error:
             st.error(st.session_state.login_error)
     else:
-        st.success(f"Welcome, {st.session_state.auth_user}!")
-        if st.button("Logout", key="logout_btn"):
+        st.success(f"Logged in as: {st.session_state.auth_user} ({st.session_state.role})")
+        if st.button("Logout", key="logout_button"):
             st.session_state.authenticated = False
             st.session_state.auth_user = None
+            st.session_state.role = None
             try:
-                st.rerun()
+                st.experimental_rerun()
             except Exception:
                 try:
                     st.rerun()
                 except Exception:
                     pass
 
+# ============================================
+# PERMISSION HELPER
+# ============================================
+def allow(action: str) -> bool:
+    """Return True if current role is allowed to perform action."""
+    role = st.session_state.get("role", None)
+    permissions = {
+        "client": {
+            "upload": False,
+            "delete": False,
+            "export_pdf": False,
+            "insight": False,
+            "compare": False,
+            "search": True,
+            "view": True
+        },
+        "lawyer": {
+            "upload": True,
+            "delete": False,
+            "export_pdf": True,
+            "insight": True,
+            "compare": True,
+            "search": True,
+            "view": True
+        },
+        "judge": {
+            "upload": True,
+            "delete": True,
+            "export_pdf": True,
+            "insight": True,
+            "compare": True,
+            "search": True,
+            "view": True
+        },
+        "admin": {
+            "upload": True,
+            "delete": True,
+            "export_pdf": True,
+            "insight": True,
+            "compare": True,
+            "search": True,
+            "view": True
+        }
+    }
+    return permissions.get(role, {}).get(action, False)
+
+# ============================================
+# Summarizer loader (cached)
+# ============================================
+@st.cache_resource
+def load_summarizer():
+    try:
+        return pipeline("summarization", model="facebook/bart-large-cnn")
+    except Exception as e:
+        st.warning("Summarizer model could not be loaded locally. Make sure transformers & model are available.")
+        return None
+
+summarizer = load_summarizer()
 # ============================================================
-# 🔐 PROTECTED SECTION STARTS HERE
+# MAIN APP — Only visible after authentication
 # ============================================================
 if st.session_state.authenticated:
 
-    # --- Streamlit UI (main) ---
     st.set_page_config(page_title="LexiBrief+", layout="wide")
-    st.title("⚖️ LexiBrief+ – AI Legal Document Management System")
-    st.markdown(f"**UI language:** {ui_lang}  |  Logged in as: **{st.session_state.auth_user}**")
+    st.title("⚖️ LexiBrief+ — AI Legal Document System")
+    st.markdown(f"Logged in as **{st.session_state.auth_user}** ({st.session_state.role})")
 
-    # --- Track uploaded files to prevent duplicates ---
+    # Track uploads to prevent duplicates
     if "uploaded_files" not in st.session_state:
         st.session_state.uploaded_files = set()
 
-    # --- Upload Section ---
-    upload_header = "Upload a judicial document (PDF, TXT, DOCX)"
-    if ui_lang != "English":
-        upload_header = translate_text(upload_header, ui_lang_code)
-    st.subheader(upload_header)
+    # ==============================
+    # UPLOAD SECTION
+    # ==============================
+    st.subheader("📤 Upload Judicial Document (PDF / TXT / DOCX)")
 
     uploaded_file = st.file_uploader(
-        translate_text("Choose a file", ui_lang_code),
+        "Choose a file",
         type=["pdf", "txt", "docx"],
-        key="unique_file_uploader_1"
+        key="file_uploader_unique"
     )
 
-    def extract_text(file_path, file_type):
+    # Function to extract text
+    def extract_text(path, ext):
         text = ""
-        if file_type == "pdf":
+        if ext == "pdf":
             try:
-                with pdfplumber.open(file_path) as pdf:
+                with pdfplumber.open(path) as pdf:
                     for page in pdf.pages:
-                        page_text = page.extract_text()
-                        if page_text:
-                            text += page_text + "\n"
-            except Exception:
-                st.warning(translate_text("Could not extract text from PDF.", ui_lang_code))
-        elif file_type == "txt":
-            with open(file_path, "r", encoding="utf-8") as f:
-                text = f.read()
-        elif file_type == "docx":
-            doc = docx.Document(file_path)
-            for para in doc.paragraphs:
-                text += para.text + "\n"
+                        ptext = page.extract_text()
+                        if ptext:
+                            text += ptext + "\n"
+            except:
+                st.error("PDF parsing failed.")
+
+        elif ext == "txt":
+            text = open(path, "r", encoding="utf-8", errors="ignore").read()
+
+        elif ext == "docx":
+            doc = docx.Document(path)
+            for p in doc.paragraphs:
+                text += p.text + "\n"
+
         return text.strip()
 
+    # ==============================
+    # FILE PROCESSING
+    # ==============================
     if uploaded_file and uploaded_file.name not in st.session_state.uploaded_files:
         st.session_state.uploaded_files.add(uploaded_file.name)
+
+        # Save file
         save_path = os.path.join(UPLOAD_FOLDER, uploaded_file.name)
         with open(save_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        file_ext = uploaded_file.name.split('.')[-1].lower()
-        file_text = extract_text(save_path, file_ext)
+        file_ext = uploaded_file.name.split(".")[-1].lower()
 
+        # Extract text
+        file_text = extract_text(save_path, file_ext)
         if not file_text:
-            st.warning(translate_text("No text could be extracted from this file.", ui_lang_code))
+            st.warning("No text extracted.")
             file_text = ""
 
-        # detect language of extracted text
-        detected_lang = detect_language(file_text) if file_text else "unknown"
+        # Detect language
+        detected_lang = detect_language(file_text)
 
-        # If not English, translate to English for summarization
-        text_for_summary = file_text
-        if detected_lang != "en" and detected_lang != "unknown":
+        # Prepare text for summarization
+        to_summarize = file_text
+        if detected_lang not in ["en", "unknown"]:
             try:
-                text_for_summary = translate_text(file_text, "en")
-            except Exception:
-                text_for_summary = file_text  # fallback
+                to_summarize = translate_text(file_text, "en")
+            except:
+                pass
 
-        # --- Summarization (English) ---
+        # ==============================
+        # SUMMARY GENERATION
+        # ==============================
         summary_en = ""
-        if len(text_for_summary) > 20:
-            max_chunk = 1000
-            chunks = [text_for_summary[i:i+max_chunk] for i in range(0, len(text_for_summary), max_chunk)]
+        if summarizer and len(to_summarize) > 20:
+            chunks = [to_summarize[i:i+900] for i in range(0, len(to_summarize), 900)]
             for chunk in chunks[:3]:
-                summary_chunk = summarizer(chunk, max_length=150, min_length=50, do_sample=False)
-                summary_en += summary_chunk[0]['summary_text'] + " "
+                out = summarizer(chunk, max_length=150, min_length=40, do_sample=False)
+                summary_en += out[0]["summary_text"] + " "
             summary_en = summary_en.strip()
         else:
-            summary_en = "Not enough text to summarize."
+            summary_en = "Not enough content to summarize."
 
-        # Generate tags (in English)
+        # ==============================
+        # TAG GENERATION
+        # ==============================
         tags_en = generate_tags(summary_en)
 
-        # Translate summary and tags into UI language for display if needed
-        summary_translated = summary_en
-        tags_translated = tags_en
-        if ui_lang_code != "en":
-            try:
-                summary_translated = translate_text(summary_en, ui_lang_code)
-                if tags_en:
-                    tag_list = [t.strip() for t in tags_en.split(",") if t.strip()]
-                    translated_tags = [translate_text(t, ui_lang_code) for t in tag_list]
-                    tags_translated = ", ".join(translated_tags)
-            except Exception:
-                summary_translated = summary_en
-                tags_translated = tags_en
+        # Translate summary to UI language
+        summary_translated = translate_text(summary_en, ui_lang_code)
+        tags_translated = ", ".join([translate_text(t, ui_lang_code) for t in tags_en.split(",")]) if tags_en else ""
 
-        # Store metadata + text + summary_en + summary_translated + tags_en + language in MySQL DB
+        # ==============================
+        # INSERT INTO DATABASE
+        # ==============================
         with engine.begin() as conn:
-            conn.execute(
-                text("INSERT INTO files (filename, filepath, file_text, summary, summary_translated, tags, language) VALUES (:fname, :fpath, :ftext, :summary, :summary_translated, :tags, :lang)"),
-                {
-                    "fname": uploaded_file.name,
-                    "fpath": save_path,
-                    "ftext": file_text,
-                    "summary": summary_en,
-                    "summary_translated": summary_translated,
-                    "tags": tags_en,
-                    "lang": detected_lang
-                }
-            )
+            conn.execute(text("""
+                INSERT INTO files (filename, filepath, file_text, summary, summary_translated, tags, language)
+                VALUES (:a,:b,:c,:d,:e,:f,:g)
+            """), {
+                "a": uploaded_file.name,
+                "b": save_path,
+                "c": file_text,
+                "d": summary_en,
+                "e": summary_translated,
+                "f": tags_en,
+                "g": detected_lang
+            })
 
-        st.success(translate_text(f"File '{uploaded_file.name}' uploaded, text extracted, summarized and tagged!", ui_lang_code))
-
-    # --- Display stored files with delete buttons ---
-    files_header = "Stored Files with Summaries"
-    if ui_lang != "English":
-        files_header = translate_text(files_header, ui_lang_code)
-    st.subheader(files_header)
+        st.success(f"Uploaded, summarized & tagged: **{uploaded_file.name}**")
+    # ============================================================
+    # 📁 STORED FILES LIST
+    # ============================================================
+    st.subheader("Stored Files")
 
     def load_files():
         with engine.connect() as conn:
-            return pd.read_sql("SELECT id, filename, uploaded_on, summary, summary_translated, tags, language FROM files ORDER BY uploaded_on DESC", conn)
+            return pd.read_sql(
+                "SELECT id, filename, uploaded_on, summary, summary_translated, tags, language FROM files ORDER BY uploaded_on DESC",
+                conn,
+            )
 
     df = load_files()
 
-    # --- Tag filter UI ---
-    tag_filter_label = "Filter by tag"
-    if ui_lang != "English":
-        tag_filter_label = translate_text(tag_filter_label, ui_lang_code)
-    st.markdown("### " + tag_filter_label)
+    # ============================================================
+    # 🔍 TAG FILTER
+    # ============================================================
+    st.markdown("### 🔎 Filter by Tag")
 
     try:
-        all_tags_df = pd.read_sql("SELECT tags FROM files", engine)
+        tag_data = pd.read_sql("SELECT tags FROM files", engine)
+
         all_tags = set()
-        for t in all_tags_df["tags"]:
-            if t and isinstance(t, str):
-                all_tags.update([tag.strip() for tag in t.split(",") if tag.strip()])
-        # For ui display, translate tags if necessary for the selector
-        if ui_lang_code != "en":
-            display_tag_map = {}
-            for tag in sorted(all_tags):
-                try:
-                    display_tag_map[tag] = translate_text(tag, ui_lang_code)
-                except Exception:
-                    display_tag_map[tag] = tag
-            tag_options_display = ["All"] + [display_tag_map[t] for t in sorted(all_tags)]
-            display_to_en_tag = {display_tag_map[t]: t for t in sorted(all_tags)}
-        else:
-            tag_options_display = ["All"] + sorted(all_tags)
-            display_to_en_tag = {}
-        tag_options = tag_options_display
+        for t in tag_data["tags"]:
+            if t:
+                all_tags.update([x.strip() for x in t.split(",") if x.strip()])
+
+        tag_options = ["All"] + sorted(all_tags)
+
     except Exception:
         tag_options = ["All"]
-        display_to_en_tag = {}
 
-    selected_tag_display = st.selectbox(translate_text("Select tag to filter", ui_lang_code), tag_options, index=0)
-    if selected_tag_display != "All":
-        if ui_lang_code != "en" and selected_tag_display in display_to_en_tag:
-            selected_tag = display_to_en_tag[selected_tag_display]
-        else:
-            selected_tag = selected_tag_display
-        if not df.empty:
-            df = df[df["tags"].str.contains(selected_tag, na=False)]
+    selected_tag = st.selectbox("Select Tag", tag_options)
 
-    if not df.empty:
-        for index, row in df.iterrows():
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                st.markdown(f"**{row['filename']}** (Uploaded: {row['uploaded_on']})")
-                lang_label = f"Language: {row.get('language', 'unknown')}"
-                st.caption(lang_label)
-                disp_summary = row.get('summary_translated') if row.get('summary_translated') else row.get('summary')
-                if ui_lang_code == "en":
-                    disp_summary = row.get('summary') or disp_summary
-                st.write(disp_summary)
-                tags_en = row.get('tags') or ""
-                tags_display = tags_en
-                if ui_lang_code != "en" and tags_en:
-                    try:
-                        tag_list = [t.strip() for t in tags_en.split(",") if t.strip()]
-                        translated_tags = [translate_text(t, ui_lang_code) for t in tag_list]
-                        tags_display = ", ".join(translated_tags)
-                    except Exception:
-                        tags_display = tags_en
-                if tags_display:
-                    st.markdown(f"**{translate_text('Tags', ui_lang_code)}:** {tags_display}")
-            with col2:
-                if st.button(translate_text("Delete", ui_lang_code), key=f"delete_{row['filename']}"):
-                    try:
-                        os.remove(os.path.join(UPLOAD_FOLDER, row['filename']))
-                    except FileNotFoundError:
-                        pass
-                    with engine.begin() as conn:
-                        conn.execute(
-                            text("DELETE FROM files WHERE filename = :fname"),
-                            {"fname": row['filename']}
-                        )
-                    st.success(translate_text(f"File '{row['filename']}' deleted successfully!", ui_lang_code))
-                    df = load_files()
-                    break
+    if selected_tag != "All" and not df.empty:
+        df = df[df["tags"].str.contains(selected_tag, na=False)]
 
-        if not df.empty:
-            st.dataframe(df)
-        else:
-            st.info(translate_text("No files uploaded yet.", ui_lang_code))
+    # ============================================================
+    # 🧾 DISPLAY FILE LIST
+    # ============================================================
+    if df.empty:
+        st.info("No files uploaded yet.")
     else:
-        st.info(translate_text("No files uploaded yet.", ui_lang_code))
+        for idx, row in df.iterrows():
+            col1, col2 = st.columns([4, 1])
 
-        # ==============================
-    # 📄 EXPORT SUMMARY TO PDF
-    # ==============================
-    from fpdf import FPDF
+            with col1:
+                st.markdown(f"### 📌 {row['filename']}")
+                st.caption(f"Uploaded: {row['uploaded_on']}")
+                st.caption(f"Detected Language: {row['language']}")
 
-    st.subheader(translate_text("Export Summary to PDF", ui_lang_code))
+                summary_display = row["summary_translated"] or row["summary"]
+                st.write(summary_display)
 
-    with st.expander(translate_text("Select a file to export", ui_lang_code)):
-        pdf_df = load_files()
-        file_names = pdf_df["filename"].tolist()
+                if row["tags"]:
+                    st.markdown(f"**Tags:** {row['tags']}")
 
-        selected_pdf_file = st.selectbox(
-            translate_text("Choose file", ui_lang_code),
-            file_names
-        )
+            with col2:
+                # Delete button (Judge Only)
+                if st.session_state.role == "Judge":
+                    if st.button(f"Delete {row['filename']}", key=f"delete_{row['id']}"):
+                        try:
+                            os.remove(row["filepath"])
+                        except:
+                            pass
+                        with engine.begin() as conn:
+                            conn.execute(text("DELETE FROM files WHERE id = :a"), {"a": row["id"]})
+                        st.success("File deleted successfully.")
+                        st.rerun()
 
-        if st.button(translate_text("Export PDF", ui_lang_code)):
-            row = pdf_df[pdf_df["filename"] == selected_pdf_file].iloc[0]
+        st.dataframe(df)
+
+    # ============================================================
+    # 📤 EXPORT SUMMARY TO PDF
+    # ============================================================
+    st.subheader("📄 Export Summary to PDF")
+
+    export_df = load_files()
+    file_choices = export_df["filename"].tolist()
+
+    if file_choices:
+        selected_export_file = st.selectbox("Choose a file to export:", file_choices)
+
+        if st.button("Export to PDF"):
+            row = export_df[export_df["filename"] == selected_export_file].iloc[0]
+
+            from fpdf import FPDF
 
             pdf = FPDF()
             pdf.add_page()
-            pdf.set_font("Arial", size=12)
 
-            pdf.multi_cell(0, 10, txt=f"Filename: {row['filename']}")
-            pdf.ln(5)
+            pdf.add_font("ArialUnicode", "", "fonts/arial-unicode-ms.ttf", uni=True)
+            pdf.set_font("ArialUnicode", size=12)
 
-            pdf.set_font("Arial", "B", 14)
-            pdf.multi_cell(0, 10, txt="Summary:")
-            pdf.set_font("Arial", size=12)
-            pdf.multi_cell(0, 8, txt=row["summary_translated"] or row["summary"])
+            pdf.multi_cell(0, 10, f"Filename: {row['filename']}")
+            pdf.ln(4)
 
-            pdf.ln(5)
-            pdf.set_font("Arial", "B", 14)
-            pdf.multi_cell(0, 10, txt="Tags:")
-            pdf.set_font("Arial", size=12)
-            pdf.multi_cell(0, 8, txt=(row["tags"] or "None"))
+            pdf.set_font("ArialUnicode", "B", 14)
+            pdf.multi_cell(0, 10, "Summary:")
+            pdf.set_font("ArialUnicode", size=12)
+            pdf.multi_cell(0, 8, row["summary_translated"] or row["summary"])
+
+            pdf.ln(4)
+            pdf.set_font("ArialUnicode", "B", 14)
+            pdf.multi_cell(0, 10, "Tags:")
+            pdf.set_font("ArialUnicode", size=12)
+            pdf.multi_cell(0, 8, row["tags"] or "None")
 
             export_path = f"{row['filename']}_summary.pdf"
             pdf.output(export_path)
 
             with open(export_path, "rb") as f:
                 st.download_button(
-                    label=translate_text("Download PDF", ui_lang_code),
+                    label="⬇ Download PDF",
                     data=f,
                     file_name=export_path,
-                    mime="application/pdf"
+                    mime="application/pdf",
                 )
 
-            st.success(translate_text("PDF exported successfully!", ui_lang_code))
-
-    # ==============================
-    # 🔎 SEMANTIC SEARCH ON SUMMARIES
-    # ==============================
+            st.success("PDF Exported Successfully!")
+    else:
+        st.info("Upload a file first to enable PDF export.")
+    # ============================================================
+    # 🔎 SEMANTIC SEARCH — FAISS VECTOR SEARCH
+    # ============================================================
     from sentence_transformers import SentenceTransformer
     import faiss
     import numpy as np
 
-    search_header = "Semantic Search on Summaries"
-    if ui_lang != "English":
-        search_header = translate_text(search_header, ui_lang_code)
-    st.subheader(search_header)
+    st.subheader("🔍 Semantic Search on Summaries")
 
     @st.cache_resource
     def load_embedder():
@@ -465,62 +479,70 @@ if st.session_state.authenticated:
 
     def build_faiss_index():
         with engine.connect() as conn:
-            df = pd.read_sql("SELECT filename, summary FROM files", conn)
-        if df.empty:
+            df_vec = pd.read_sql("SELECT filename, summary FROM files", conn)
+
+        if df_vec.empty:
             return None, None
-        texts = df["summary"].fillna("").tolist()
+
+        texts = df_vec["summary"].fillna("").tolist()
         embeddings = embedder.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+
         index = faiss.IndexFlatL2(embeddings.shape[1])
         index.add(np.array(embeddings))
-        return index, df
+
+        return index, df_vec
 
     index, df_search = build_faiss_index()
 
-    query_label = "Enter a query to find related summaries : "
-    if ui_lang != "English":
-        query_label = translate_text(query_label, ui_lang_code)
-    query = st.text_input(query_label)
+    # ============================================================
+    # 🔤 QUERY BOX (supports any language)
+    # ============================================================
+    query_input = st.text_input("Enter your search query:")
 
-    if query:
-        query_en = query
+    if query_input:
+
+        # Translate query to English
         try:
-            if ui_lang_code != "en":
-                query_en = translate_text(query, "en")
-        except Exception:
-            query_en = query
+            query_en = GoogleTranslator(source="auto", target="en").translate(query_input)
+        except:
+            query_en = query_input
 
-        if index is not None:
+        if index is None:
+            st.warning("No files in database to search. Upload some documents.")
+        else:
+            # Encode the query
             query_vec = embedder.encode([query_en], convert_to_numpy=True)
+
             k = min(5, len(df_search))
             distances, indices = index.search(query_vec, k)
-            st.markdown("### " + translate_text("Top Matching Summaries", ui_lang_code))
-            for i, idx in enumerate(indices[0]):
-                if idx < len(df_search):
-                    filename = df_search.iloc[idx]['filename']
-                    summary_en = df_search.iloc[idx]['summary']
-                    summary_disp = summary_en
-                    if ui_lang_code != "en":
-                        try:
-                            summary_disp = translate_text(summary_en, ui_lang_code)
-                        except Exception:
-                            summary_disp = summary_en
-                    st.markdown(f"**{i+1}. {filename}**")
-                    st.write(summary_disp)
-                    st.divider()
-        else:
-            st.warning(translate_text("No summaries found in the database. Upload some documents first.", ui_lang_code))
-    else:
-        st.info(translate_text("Type a query above to search across summaries.", ui_lang_code))
 
-    # ==============================
-    # ⚖️ JUDICIAL INSIGHT PANEL
-    # ==============================
+            st.markdown("### 🔎 Top Matching Results")
+
+            for rank, idx in enumerate(indices[0]):
+                if idx < len(df_search):
+
+                    fname = df_search.iloc[idx]["filename"]
+                    summary_en = df_search.iloc[idx]["summary"]
+
+                    # Translate summary to UI language for display
+                    try:
+                        summary_disp = GoogleTranslator(source="auto", target=ui_lang_code).translate(summary_en)
+                    except:
+                        summary_disp = summary_en
+
+                    st.markdown(f"#### {rank+1}. 📄 **{fname}**")
+                    st.write(summary_disp)
+                    st.caption(f"Distance Score: {distances[0][rank]:.4f}")
+
+                    st.divider()
+    else:
+        st.info("Type something above to search across summaries.")
+    # ============================================================
+    # ⚖️ JUDICIAL INSIGHT PANEL — AI LEGAL ANALYSIS
+    # ============================================================
     from transformers import pipeline
 
-    insight_header = "Judicial Insight Panel"
-    if ui_lang != "English":
-        insight_header = translate_text(insight_header, ui_lang_code)
-    st.subheader("⚖️ " + insight_header)
+    st.subheader("⚖️ Judicial Insight Panel")
 
     @st.cache_resource
     def load_insight_model():
@@ -528,31 +550,54 @@ if st.session_state.authenticated:
 
     insight_model = load_insight_model()
 
-    if query and index is not None and len(df_search) > 0:
-        st.markdown("### " + translate_text("AI-Generated Insights", ui_lang_code))
-        top_indices = indices[0][:3]
-        combined_summary_text = "\n".join(
-            [df_search.iloc[i]["summary"][:500] for i in top_indices if i < len(df_search)]
+    if query_input and index is not None and len(df_search) > 0:
+
+        st.markdown("### 🧠 AI-Generated Legal Insights")
+
+        top_indices = indices[0][:3]  # best 3 matches
+
+        combined_text = "\n".join(
+            [
+                df_search.iloc[i]["summary"][:500]
+                for i in top_indices
+                if i < len(df_search)
+            ]
         )
-        prompt = (
-            "Analyze the following judicial case summaries and provide insights:\n"
-            "1. Identify the main legal themes.\n"
-            "2. Mention case tone (favorable/unfavorable/neutral).\n"
-            "3. Give possible societal or policy impact.\n\n"
-            f"Summaries:\n{combined_summary_text}\n\nInsights:"
-        )
-        with st.spinner(translate_text("Generating judicial insights...", ui_lang_code)):
-            insight_output = insight_model(prompt, max_new_tokens=100, do_sample=False)
-        insight_text_en = insight_output[0]["generated_text"]
-        insight_text_disp = insight_text_en
+
+        prompt = f"""
+        Analyze the following judicial case summaries and provide structured insights:
+        1. Identify the main legal issues involved.
+        2. Describe the tone of the judgment (favorable / neutral / unfavorable).
+        3. Summarize possible social or legal impact.
+        4. Suggest any policy implications or areas needing reform.
+
+        Case Summaries:
+        {combined_text}
+
+        Insights:
+        """
+
+        with st.spinner("Generating judicial insight..."):
+            insight_raw = insight_model(prompt, max_new_tokens=200, do_sample=False)
+
+        insight_text_en = insight_raw[0]["generated_text"]
+
+        # Translate insights to UI language if needed
         if ui_lang_code != "en":
             try:
-                insight_text_disp = translate_text(insight_text_en, ui_lang_code)
-            except Exception:
-                insight_text_disp = insight_text_en
-        st.write(insight_text_disp)
-    else:
-        st.info(translate_text("Run a search above to view judicial insights.", ui_lang_code))
+                insight_text = GoogleTranslator(source="auto", target=ui_lang_code).translate(insight_text_en)
+            except:
+                insight_text = insight_text_en
+        else:
+            insight_text = insight_text_en
 
+        st.write(insight_text)
+
+    else:
+        st.info("Run a semantic search to enable judicial insights.")
+
+# ============================================================
+# 🚪 If user NOT logged in
+# ============================================================
 else:
-    st.info("Please login from the sidebar to access LexiBrief+.")
+    st.info("Please log in from the sidebar to access LexiBrief+.") 
