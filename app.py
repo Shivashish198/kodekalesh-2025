@@ -395,6 +395,56 @@ if st.session_state.authenticated:
     else:
         st.info(translate_text("No files uploaded yet.", ui_lang_code))
 
+        # ==============================
+    # 📄 EXPORT SUMMARY TO PDF
+    # ==============================
+    from fpdf import FPDF
+
+    st.subheader(translate_text("Export Summary to PDF", ui_lang_code))
+
+    with st.expander(translate_text("Select a file to export", ui_lang_code)):
+        pdf_df = load_files()
+        file_names = pdf_df["filename"].tolist()
+
+        selected_pdf_file = st.selectbox(
+            translate_text("Choose file", ui_lang_code),
+            file_names
+        )
+
+        if st.button(translate_text("Export PDF", ui_lang_code)):
+            row = pdf_df[pdf_df["filename"] == selected_pdf_file].iloc[0]
+
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=12)
+
+            pdf.multi_cell(0, 10, txt=f"Filename: {row['filename']}")
+            pdf.ln(5)
+
+            pdf.set_font("Arial", "B", 14)
+            pdf.multi_cell(0, 10, txt="Summary:")
+            pdf.set_font("Arial", size=12)
+            pdf.multi_cell(0, 8, txt=row["summary_translated"] or row["summary"])
+
+            pdf.ln(5)
+            pdf.set_font("Arial", "B", 14)
+            pdf.multi_cell(0, 10, txt="Tags:")
+            pdf.set_font("Arial", size=12)
+            pdf.multi_cell(0, 8, txt=(row["tags"] or "None"))
+
+            export_path = f"{row['filename']}_summary.pdf"
+            pdf.output(export_path)
+
+            with open(export_path, "rb") as f:
+                st.download_button(
+                    label=translate_text("Download PDF", ui_lang_code),
+                    data=f,
+                    file_name=export_path,
+                    mime="application/pdf"
+                )
+
+            st.success(translate_text("PDF exported successfully!", ui_lang_code))
+
     # ==============================
     # 🔎 SEMANTIC SEARCH ON SUMMARIES
     # ==============================
