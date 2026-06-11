@@ -222,15 +222,6 @@ Summarization	facebook/bart-large-cnn
 Embeddings	all-MiniLM-L6-v2
 Insights	google/flan-t5-small
 Keyword Tagging	KeyBERT
-🎨 Screenshots
-
-(Add these after deployment)
-
-![Login Page](resources/login.png)
-![Dashboard](resources/dashboard.png)
-![Semantic Search](resources/search.png)
-![Insights Panel](resources/insights.png)
-![PDF Export](resources/export.png)
 
 🏁 Future Improvements
 
@@ -243,3 +234,8 @@ Automatic case classification (civil/criminal/writ etc.)
 Timeline extraction
 
 Workflow automation for courts
+
+Contributors:-
+1) [Shivashish Mehrotra](https://github.com/Shivashish198)
+2) [Suryansh Singh](https://github.com/Suryansh-2412)
+3) [Prakhar Dixit](https://github.com/prakhar54dixit)
